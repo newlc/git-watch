@@ -1,0 +1,159 @@
+#!/bin/bash
+# The MIT License (MIT)
+#
+# Copyright (c) 2014 Anton Bukarev iam@bukarev.org
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+# TODO: integration with https://github.com/alloy/terminal-notifier
+# TODO: add configuration to git for choosing notifications
+# TODO: add support for git
+
+set -e
+export LC_ALL=C            # make sure git talks english
+script_name=$(basename $0) #get application name
+
+# notify user
+function notification() {
+  local notification_icon="$1"
+  local notification_title="$2"
+  local notification_description="$3"
+
+  # for Debug purposes
+  echo "ICON_PATH=\"$1\" TITLE=\"$2\" DESCRIPTION=\"$3\"" >> ${HOME}/watch.log
+
+  notification_cmd='growlnotify -n "$script_name" --image "$notification_icon" -m "$notification_description" "$notification_title"'
+  if [ -n "$notification_cmd" ]; then
+    eval $notification_cmd
+  fi
+}
+
+# print current status
+function status() {
+  local count=$(crontab -l | grep "$0 cron $(git rev-parse --show-toplevel)" | wc -l | sed 's/ //g')
+  if [ $count -ne 0 ]; then
+    echo "Subscribed";
+  else
+    echo "Not subscribed"
+  fi
+}
+
+# add job to cron
+function start() {
+  if [ $(crontab -l | grep "$0 cron $(git rev-parse --show-toplevel)" | wc -l | sed 's/ //g') -ne 0 ]; then
+    echo "Notifications already enabled for this repository"
+    exit 1
+  fi
+  
+  cron_time=$(git config watch.sleep || true) #get sleep time from git config
+  cron_time=${cron_time:-"*/5 * * * *"}       #set update sleep if watch.sleep in git config doesn't exists
+  
+  tmp_dir=$(mktemp -dt cron)
+  crontab -l >> $tmp_dir/jobs || true
+  echo "$cron_time $0 cron $(git rev-parse --show-toplevel)" >> "$tmp_dir/jobs"
+  crontab "$tmp_dir/jobs"
+  rm "$tmp_dir/jobs"
+
+  echo "Notifications has been enabled"
+}
+
+# remove job from cron
+function stop() {
+  if [ $(crontab -l | grep "$0 cron $(git rev-parse --show-toplevel)" | wc -l | sed 's/ //g') -eq 0 ]; then
+    echo "Notifications already disabled for this repository"
+    exit 1
+  fi
+  
+  local tmp_dir=$(mktemp -dt cron)
+  crontab -l | grep -v "$0 cron $(git rev-parse --show-toplevel)" >> $tmp_dir/jobs || true
+  crontab "$tmp_dir/jobs"
+  rm "$tmp_dir/jobs"
+  
+  echo "Notifications has been disabled"
+}
+
+#get number of changes
+function cron() {
+  cd $1
+  update_settings $1
+  number_of_changes=$(git svn fetch | grep = | wc -l | sed 's/ //g')
+  #process changes if they exists
+  if [ $number_of_changes -ne 0 ]; then
+    icon_path=$(git config watch.icon || true)
+    icon_path=${icon_path:-$HOME/.git-watch/icon.png}
+    icon_path=${icon_path// /\\ }
+    eval icon_path=$icon_path
+    repo_name=$(basename $(git rev-parse --show-toplevel))
+    branch_name=$(basename $(git svn info | grep URL | awk '{print $2}'))
+    commit_messages=$(git svn log --oneline | head -$number_of_changes)
+    # for Debug purposes
+    echo $icon_path "\"New commits in $repo_name/$branch_name\"" "\"$commit_messages\"" >> ${HOME}/watch.log
+    notification $icon_path "\"New commits in $repo_name/$branch_name\"" "\"$commit_messages\""
+  fi
+}
+
+function update_settings() {
+  schedule=$(git config watch.sleep)
+  if [[ $schedule ]]; then
+    git_schedule=$(echo $schedule | awk '{print $1$2$3$4$5}')
+    cron_schedule=$(crontab -l | grep "$0 cron $1" | awk '{print $1$2$3$4$5}')
+    if [[ $git_schedule != cron_schedule ]]; then
+      stop
+      start
+    fi
+  fi
+}
+
+# script should works only in git repository
+workspace=$2
+workspace=${workspace:-$(git rev-parse --show-toplevel)}
+
+if [ ! -d $workspace ]; then
+    echo "error: directory $workspace doesn't exists"
+    exit 1
+fi
+
+if [[ $(cd $workspace && git rev-parse --git-dir 2>/dev/null) != ".git" ]]; then
+  echo "error: script works only in git repository"
+  exit 1
+fi
+
+case "$1" in
+  start)
+  start
+    ;;
+  
+  stop)
+    stop
+    ;;
+    
+  status)
+    status
+    ;;
+  
+  cron)
+    cron $2
+    ;;
+  
+  *)
+    echo "Usage: git watch {start|stop|status}"
+    echo "You may specify cron time and icon for each repository."
+    echo "Example: git config watch.schedule \"* * * * *\""
+    exit 1
+esac
